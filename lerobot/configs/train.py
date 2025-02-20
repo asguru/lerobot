@@ -46,6 +46,9 @@ class TrainPipelineConfig(HubMixin):
     # Note that when resuming a run, the default behavior is to use the configuration from the checkpoint,
     # regardless of what's provided with the training command at the time of resumption.
     resume: bool = False
+    # `distributed` determines whether to use FSDP training. FSDP is a distributed training method that uses
+    # gradient accumulation to simulate larger batch sizes.
+    distributed: bool = False
     # `seed` is used for training (eg: model initialization, dataset shuffling)
     # AND for the evaluation environments.
     seed: int | None = 1000

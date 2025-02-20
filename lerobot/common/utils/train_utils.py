@@ -20,6 +20,15 @@ from termcolor import colored
 from torch.optim import Optimizer
 from torch.optim.lr_scheduler import LRScheduler
 
+# Imports for FSDP
+import torch.distributed as dist
+from torch.distributed.fsdp import (
+    FullyShardedDataParallel as FSDP,
+    MixedPrecision,
+    StateDictType,
+    BackwardPrefetch,
+)
+
 from lerobot.common.constants import (
     CHECKPOINTS_DIR,
     LAST_CHECKPOINT_LINK,
@@ -59,12 +68,32 @@ def load_training_step(save_dir: Path) -> int:
     return training_step["step"]
 
 
+# def update_last_checkpoint(checkpoint_dir: Path) -> Path:
+#     last_checkpoint_dir = checkpoint_dir.parent / LAST_CHECKPOINT_LINK
+#     if last_checkpoint_dir.is_symlink():
+#         last_checkpoint_dir.unlink()
+#     relative_target = checkpoint_dir.relative_to(checkpoint_dir.parent)
+#     last_checkpoint_dir.symlink_to(relative_target)
+
+
 def update_last_checkpoint(checkpoint_dir: Path) -> Path:
-    last_checkpoint_dir = checkpoint_dir.parent / LAST_CHECKPOINT_LINK
-    if last_checkpoint_dir.is_symlink():
-        last_checkpoint_dir.unlink()
-    relative_target = checkpoint_dir.relative_to(checkpoint_dir.parent)
-    last_checkpoint_dir.symlink_to(relative_target)
+    # Only create symlink on rank 0
+    if dist.is_initialized():
+        if dist.get_rank() == 0:
+            last_checkpoint_dir = checkpoint_dir.parent / LAST_CHECKPOINT_LINK
+            if last_checkpoint_dir.is_symlink():
+                last_checkpoint_dir.unlink()
+            relative_target = checkpoint_dir.relative_to(checkpoint_dir.parent)
+            last_checkpoint_dir.symlink_to(relative_target)
+        # Make sure all processes wait for symlink creation
+        dist.barrier()
+    else:
+        # Original behavior for non-distributed case
+        last_checkpoint_dir = checkpoint_dir.parent / LAST_CHECKPOINT_LINK
+        if last_checkpoint_dir.is_symlink():
+            last_checkpoint_dir.unlink()
+        relative_target = checkpoint_dir.relative_to(checkpoint_dir.parent)
+        last_checkpoint_dir.symlink_to(relative_target)
 
 
 def save_checkpoint(
@@ -100,6 +129,101 @@ def save_checkpoint(
     policy.save_pretrained(pretrained_dir)
     cfg.save_pretrained(pretrained_dir)
     save_training_state(checkpoint_dir, step, optimizer, scheduler)
+
+
+def save_fsdp_checkpoint(
+    checkpoint_dir: Path,
+    step: int,
+    cfg: TrainPipelineConfig,
+    policy: PreTrainedPolicy,
+    optimizer: Optimizer,
+    scheduler: LRScheduler | None = None,
+) -> None:
+    """Creates the same directory structure as save_checkpoint but handles FSDP-specific saving:
+
+    005000/  #  training step at checkpoint
+    ├── pretrained_model/
+    │   ├── config.json  # policy config
+    │   ├── model.safetensors  # policy weights
+    │   └── train_config.json  # train config
+    └── training_state/
+        ├── optimizer_param_groups.json  #  optimizer param groups
+        ├── optimizer_state.safetensors  # optimizer state
+        ├── rng_state.safetensors  # rng states
+        ├── scheduler_state.json  # scheduler state
+        └── training_step.json  # training step
+
+    Args:
+        cfg (TrainPipelineConfig): The training config used for this run.
+        step (int): The training step at that checkpoint.
+        policy (PreTrainedPolicy): The FSDP-wrapped policy to save.
+        optimizer (Optimizer): The optimizer to save the state from.
+        scheduler (LRScheduler | None, optional): The scheduler to save the state from.
+    """
+    pretrained_dir = checkpoint_dir / PRETRAINED_MODEL_DIR
+    training_state_dir = checkpoint_dir / TRAINING_STATE_DIR
+
+    # Only save on rank 0 to avoid conflicts
+    if dist.get_rank() == 0:
+        pretrained_dir.mkdir(parents=True, exist_ok=True)
+        training_state_dir.mkdir(parents=True, exist_ok=True)
+
+    # Ensure all processes reach this point before saving
+    dist.barrier()
+
+    with FSDP.state_dict_type(policy, StateDictType.FULL_STATE_DICT):
+        policy_state = policy.state_dict()
+        if dist.get_rank() == 0:
+            # Get the unwrapped model to access save_pretrained
+            unwrapped_policy = policy.module
+            unwrapped_policy.save_pretrained(pretrained_dir, state_dict=policy_state)
+            cfg.save_pretrained(pretrained_dir)
+
+    # Save training state
+    if dist.get_rank() == 0:
+        # Save step
+        write_json({"step": step}, training_state_dir / "training_step.json")
+
+        # Save RNG states
+        rng_state = {
+            "torch_rng": torch.get_rng_state(),
+            "cuda_rng": torch.cuda.get_rng_state() if torch.cuda.is_available() else None,
+            "numpy_rng": np.random.get_state(),
+            "python_rng": random.getstate(),
+        }
+        save_safetensors(rng_state, training_state_dir / "rng_state.safetensors")
+
+        # Save optimizer state
+        optim_state = FSDP.full_optim_state_dict(policy, optimizer)
+        save_safetensors(optim_state, training_state_dir / "optimizer_state.safetensors")
+        write_json(optimizer.state_dict()["param_groups"], training_state_dir / "optimizer_param_groups.json")
+
+        # Save scheduler state if it exists
+        if scheduler is not None:
+            write_json(scheduler.state_dict(), training_state_dir / "scheduler_state.json")
+
+    # Ensure all processes wait for saving to complete
+    dist.barrier()
+
+
+# def save_fsdp_checkpoint(checkpoint_dir, step, policy, optimizer, lr_scheduler, step, checkpoint_dir):
+#     save_policy_name = f"{checkpoint_dir}/policy.pt"
+#     save_optim_name = f"{checkpoint_dir}/optimizer.pt"
+    
+#     # Save model in FSDP format
+#     full_state_dict = policy.state_dict()
+    
+#     if dist.get_rank() == 0:
+#         torch.save(full_state_dict, save_policy_name)
+#         # Save optimizer state
+#         optim_state = FSDP.full_optim_state_dict(policy, optimizer)
+#         torch.save({
+#             'step': step,
+#             'optimizer_state_dict': optim_state,
+#             'lr_scheduler_state_dict': lr_scheduler.state_dict() if lr_scheduler else None
+#         }, save_optim_name)
+    
+#     dist.barrier()
 
 
 def save_training_state(

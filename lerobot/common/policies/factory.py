@@ -98,8 +98,8 @@ def make_policy(
     Returns:
         PreTrainedPolicy: _description_
     """
-    if bool(ds_meta) == bool(env_cfg):
-        raise ValueError("Either one of a dataset metadata or a sim env must be provided.")
+    # if bool(ds_meta) == bool(env_cfg):
+    #     raise ValueError("Either one of a dataset metadata or a sim env must be provided.")
 
     # NOTE: Currently, if you try to run vqbet with mps backend, you'll get this error.
     # TODO(aliberts, rcadene): Implement a check_backend_compatibility in policies?
@@ -133,10 +133,13 @@ def make_policy(
     cfg.input_features = {key: ft for key, ft in features.items() if key not in cfg.output_features}
     kwargs["config"] = cfg
 
+    print("-----------THERE IS A PRETRAINED PATH? {}-----------".format(cfg.pretrained_path))
     if cfg.pretrained_path:
         # Load a pretrained policy and override the config if needed (for example, if there are inference-time
         # hyperparameters that we want to vary).
         kwargs["pretrained_name_or_path"] = cfg.pretrained_path
+        print("calling from pretrained")
+        print("policy cls is {}".format(policy_cls))
         policy = policy_cls.from_pretrained(**kwargs)
     else:
         # Make a fresh policy.
