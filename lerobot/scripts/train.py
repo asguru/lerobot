@@ -13,6 +13,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import os
 import logging
 import time
 from contextlib import nullcontext
@@ -21,8 +22,20 @@ from typing import Any
 
 import torch
 from termcolor import colored
-from torch.amp import GradScaler
+from torch.cuda.amp import GradScaler
 from torch.optim import Optimizer
+
+# Imports for FSDP
+import torch.distributed as dist
+from torch.distributed.fsdp import (
+    FullyShardedDataParallel as FSDP,
+    MixedPrecision,
+    StateDictType,
+    BackwardPrefetch,
+)
+from torch.distributed.fsdp.fully_sharded_data_parallel import (
+    CPUOffload,
+)
 
 from lerobot.common.datasets.factory import make_dataset
 from lerobot.common.datasets.sampler import EpisodeAwareSampler
@@ -39,6 +52,7 @@ from lerobot.common.utils.train_utils import (
     get_step_identifier,
     load_training_state,
     save_checkpoint,
+    save_fsdp_checkpoint,
     update_last_checkpoint,
 )
 from lerobot.common.utils.utils import (
@@ -51,6 +65,58 @@ from lerobot.common.utils.wandb_utils import WandBLogger
 from lerobot.configs import parser
 from lerobot.configs.train import TrainPipelineConfig
 from lerobot.scripts.eval import eval_policy
+
+
+# def update_policy(
+#     train_metrics: MetricsTracker,
+#     policy: PreTrainedPolicy,
+#     batch: Any,
+#     optimizer: Optimizer,
+#     grad_clip_norm: float,
+#     grad_scaler: GradScaler,
+#     lr_scheduler=None,
+#     use_amp: bool = False,
+#     lock=None,
+# ) -> tuple[MetricsTracker, dict]:
+#     start_time = time.perf_counter()
+#     device = get_device_from_parameters(policy)
+#     policy.train()
+#     with torch.autocast(device_type=device.type) if use_amp else nullcontext():
+#         loss, output_dict = policy.forward(batch)
+#         # TODO(rcadene): policy.unnormalize_outputs(out_dict)
+#     grad_scaler.scale(loss).backward()
+
+#     # Unscale the graident of the optimzer's assigned params in-place **prior to gradient clipping**.
+#     grad_scaler.unscale_(optimizer)
+
+#     grad_norm = torch.nn.utils.clip_grad_norm_(
+#         policy.parameters(),
+#         grad_clip_norm,
+#         error_if_nonfinite=False,
+#     )
+
+#     # Optimizer's gradients are already unscaled, so scaler.step does not unscale them,
+#     # although it still skips optimizer.step() if the gradients contain infs or NaNs.
+#     with lock if lock is not None else nullcontext():
+#         grad_scaler.step(optimizer)
+#     # Updates the scale for next iteration.
+#     grad_scaler.update()
+
+#     optimizer.zero_grad()
+
+#     # Step through pytorch scheduler at every batch instead of epoch
+#     if lr_scheduler is not None:
+#         lr_scheduler.step()
+
+#     if has_method(policy, "update"):
+#         # To possibly update an internal buffer (for instance an Exponential Moving Average like in TDMPC).
+#         policy.update()
+
+#     train_metrics.loss = loss.item()
+#     train_metrics.grad_norm = grad_norm.item()
+#     train_metrics.lr = optimizer.param_groups[0]["lr"]
+#     train_metrics.update_s = time.perf_counter() - start_time
+#     return train_metrics, output_dict
 
 
 def update_policy(
@@ -67,35 +133,41 @@ def update_policy(
     start_time = time.perf_counter()
     device = get_device_from_parameters(policy)
     policy.train()
-    with torch.autocast(device_type=device.type) if use_amp else nullcontext():
+    
+    is_fsdp = isinstance(policy, FSDP)
+    
+    # Keep autocast for both FSDP and non-FSDP when using AMP
+    with torch.autocast(device_type=device.type, dtype=torch.bfloat16) if use_amp else nullcontext():
         loss, output_dict = policy.forward(batch)
-        # TODO(rcadene): policy.unnormalize_outputs(out_dict)
-    grad_scaler.scale(loss).backward()
+        
+        # For FSDP, backward should be called directly within the autocast context
+        if is_fsdp:
+            loss.backward()
+        else:
+            grad_scaler.scale(loss).backward()
+            grad_scaler.unscale_(optimizer)
 
-    # Unscale the graident of the optimzer's assigned params in-place **prior to gradient clipping**.
-    grad_scaler.unscale_(optimizer)
-
+    # Gradient clipping works the same way for both FSDP and non-FSDP
     grad_norm = torch.nn.utils.clip_grad_norm_(
         policy.parameters(),
         grad_clip_norm,
         error_if_nonfinite=False,
     )
 
-    # Optimizer's gradients are already unscaled, so scaler.step does not unscale them,
-    # although it still skips optimizer.step() if the gradients contain infs or NaNs.
+    # Step optimizer
     with lock if lock is not None else nullcontext():
-        grad_scaler.step(optimizer)
-    # Updates the scale for next iteration.
-    grad_scaler.update()
+        if is_fsdp:
+            optimizer.step()
+        else:
+            grad_scaler.step(optimizer)
+            grad_scaler.update()
 
     optimizer.zero_grad()
 
-    # Step through pytorch scheduler at every batch instead of epoch
     if lr_scheduler is not None:
         lr_scheduler.step()
 
     if has_method(policy, "update"):
-        # To possibly update an internal buffer (for instance an Exponential Moving Average like in TDMPC).
         policy.update()
 
     train_metrics.loss = loss.item()
@@ -109,6 +181,18 @@ def update_policy(
 def train(cfg: TrainPipelineConfig):
     cfg.validate()
     logging.info(pformat(cfg.to_dict()))
+
+    def init_distributed():
+        dist.init_process_group(backend="nccl")
+        torch.cuda.set_device(int(os.environ["LOCAL_RANK"]))
+
+    if cfg.distributed:
+        init_distributed()
+        world_size = dist.get_world_size()
+        rank = dist.get_rank()
+    else:
+        world_size = 1
+        rank = 0
 
     if cfg.wandb.enable and cfg.wandb.project:
         wandb_logger = WandBLogger(cfg)
@@ -124,8 +208,22 @@ def train(cfg: TrainPipelineConfig):
     torch.backends.cudnn.benchmark = True
     torch.backends.cuda.matmul.allow_tf32 = True
 
+    # logging.info("Creating dataset")
+    # dataset = make_dataset(cfg)
+
     logging.info("Creating dataset")
-    dataset = make_dataset(cfg)
+    # The below logic is to prevent concurrency issues with writing of
+    # files when using distributed training.
+    if not cfg.distributed or dist.get_rank() == 0:
+        # File writing operations
+        dataset = make_dataset(cfg)
+        # Make sure files are written
+        dist.barrier()
+    else:
+        # Other ranks wait for rank 0 to finish writing files
+        dist.barrier()
+        # Then create their own dataset object
+        dataset = make_dataset(cfg)
 
     # Create environment used for evaluating checkpoints during training on simulation data.
     # On real-world data, no need to create an environment as evaluations are done outside train.py,
@@ -154,6 +252,30 @@ def train(cfg: TrainPipelineConfig):
     num_learnable_params = sum(p.numel() for p in policy.parameters() if p.requires_grad)
     num_total_params = sum(p.numel() for p in policy.parameters())
 
+    def wrap_policy_with_fsdp(policy):
+        # Convert all parameters to float32 (or bfloat16) before FSDP wrapping
+        policy = policy.to(torch.float32)  # or torch.bfloat16
+        
+        mixed_precision_policy = MixedPrecision(
+            param_dtype=torch.bfloat16,
+            reduce_dtype=torch.bfloat16,
+            buffer_dtype=torch.bfloat16,
+        )
+        
+        fsdp_policy = FSDP(
+            policy,
+            mixed_precision=mixed_precision_policy,
+            cpu_offload=CPUOffload(offload_params=True),
+            backward_prefetch=BackwardPrefetch.BACKWARD_PRE,
+            device_id=torch.cuda.current_device(),
+            use_orig_params=True,
+        )
+        return fsdp_policy
+
+    # After policy creation:
+    if cfg.distributed:
+        policy = wrap_policy_with_fsdp(policy)
+
     logging.info(colored("Output dir:", "yellow", attrs=["bold"]) + f" {cfg.output_dir}")
     if cfg.env is not None:
         logging.info(f"{cfg.env.task=}")
@@ -170,10 +292,21 @@ def train(cfg: TrainPipelineConfig):
             dataset.episode_data_index,
             drop_n_last_frames=cfg.policy.drop_n_last_frames,
             shuffle=True,
+            num_replicas=world_size,
+            rank=rank,
         )
     else:
-        shuffle = True
-        sampler = None
+        if cfg.distributed:
+            shuffle = False
+            sampler = torch.utils.data.DistributedSampler(
+                dataset,
+                num_replicas=world_size,
+                rank=rank,
+                shuffle=True,
+            )
+        else:
+            shuffle = True
+            sampler = None
 
     dataloader = torch.utils.data.DataLoader(
         dataset,
@@ -241,43 +374,89 @@ def train(cfg: TrainPipelineConfig):
         if cfg.save_checkpoint and is_saving_step:
             logging.info(f"Checkpoint policy after step {step}")
             checkpoint_dir = get_step_checkpoint_dir(cfg.output_dir, cfg.steps, step)
-            save_checkpoint(checkpoint_dir, step, cfg, policy, optimizer, lr_scheduler)
+            if cfg.distributed:
+                save_fsdp_checkpoint(checkpoint_dir, step, cfg, policy, optimizer, lr_scheduler)
+            else:
+                save_checkpoint(checkpoint_dir, step, cfg, policy, optimizer, lr_scheduler)
             update_last_checkpoint(checkpoint_dir)
             if wandb_logger:
                 wandb_logger.log_policy(checkpoint_dir)
 
+        # if cfg.env and is_eval_step:
+        #     step_id = get_step_identifier(step, cfg.steps)
+        #     logging.info(f"Eval policy at step {step}")
+        #     with torch.no_grad(), torch.autocast(device_type=device.type) if cfg.use_amp else nullcontext():
+        #         eval_info = eval_policy(
+        #             eval_env,
+        #             policy,
+        #             cfg.eval.n_episodes,
+        #             videos_dir=cfg.output_dir / "eval" / f"videos_step_{step_id}",
+        #             max_episodes_rendered=4,
+        #             start_seed=cfg.seed,
+        #         )
+
+        #     eval_metrics = {
+        #         "avg_sum_reward": AverageMeter("∑rwrd", ":.3f"),
+        #         "pc_success": AverageMeter("success", ":.1f"),
+        #         "eval_s": AverageMeter("eval_s", ":.3f"),
+        #     }
+        #     eval_tracker = MetricsTracker(
+        #         cfg.batch_size, dataset.num_frames, dataset.num_episodes, eval_metrics, initial_step=step
+        #     )
+        #     eval_tracker.eval_s = eval_info["aggregated"].pop("eval_s")
+        #     eval_tracker.avg_sum_reward = eval_info["aggregated"].pop("avg_sum_reward")
+        #     eval_tracker.pc_success = eval_info["aggregated"].pop("pc_success")
+        #     logging.info(eval_tracker)
+        #     if wandb_logger:
+        #         wandb_log_dict = {**eval_tracker.to_dict(), **eval_info}
+        #         wandb_logger.log_dict(wandb_log_dict, step, mode="eval")
+        #         wandb_logger.log_video(eval_info["video_paths"][0], step, mode="eval")
+        
         if cfg.env and is_eval_step:
             step_id = get_step_identifier(step, cfg.steps)
-            logging.info(f"Eval policy at step {step}")
-            with torch.no_grad(), torch.autocast(device_type=device.type) if cfg.use_amp else nullcontext():
-                eval_info = eval_policy(
-                    eval_env,
-                    policy,
-                    cfg.eval.n_episodes,
-                    videos_dir=cfg.output_dir / "eval" / f"videos_step_{step_id}",
-                    max_episodes_rendered=4,
-                    start_seed=cfg.seed,
-                )
+            
+            # Only run eval on rank 0
+            if not cfg.distributed or dist.get_rank() == 0:
+                logging.info(f"Eval policy at step {step}")
+                # Set FSDP to use full state dict during eval
+                with FSDP.state_dict_type(policy, StateDictType.FULL_STATE_DICT), \
+                    torch.no_grad(), \
+                    torch.autocast(device_type=device.type) if cfg.use_amp else nullcontext():
+                    eval_info = eval_policy(
+                        eval_env,
+                        policy,
+                        cfg.eval.n_episodes,
+                        videos_dir=cfg.output_dir / "eval" / f"videos_step_{step_id}",
+                        max_episodes_rendered=4,
+                        start_seed=cfg.seed,
+                    )
 
-            eval_metrics = {
-                "avg_sum_reward": AverageMeter("∑rwrd", ":.3f"),
-                "pc_success": AverageMeter("success", ":.1f"),
-                "eval_s": AverageMeter("eval_s", ":.3f"),
-            }
-            eval_tracker = MetricsTracker(
-                cfg.batch_size, dataset.num_frames, dataset.num_episodes, eval_metrics, initial_step=step
-            )
-            eval_tracker.eval_s = eval_info["aggregated"].pop("eval_s")
-            eval_tracker.avg_sum_reward = eval_info["aggregated"].pop("avg_sum_reward")
-            eval_tracker.pc_success = eval_info["aggregated"].pop("pc_success")
-            logging.info(eval_tracker)
-            if wandb_logger:
-                wandb_log_dict = {**eval_tracker.to_dict(), **eval_info}
-                wandb_logger.log_dict(wandb_log_dict, step, mode="eval")
-                wandb_logger.log_video(eval_info["video_paths"][0], step, mode="eval")
+                eval_metrics = {
+                    "avg_sum_reward": AverageMeter("∑rwrd", ":.3f"),
+                    "pc_success": AverageMeter("success", ":.1f"),
+                    "eval_s": AverageMeter("eval_s", ":.3f"),
+                }
+                eval_tracker = MetricsTracker(
+                    cfg.batch_size, dataset.num_frames, dataset.num_episodes, eval_metrics, initial_step=step
+                )
+                eval_tracker.eval_s = eval_info["aggregated"].pop("eval_s")
+                eval_tracker.avg_sum_reward = eval_info["aggregated"].pop("avg_sum_reward")
+                eval_tracker.pc_success = eval_info["aggregated"].pop("pc_success")
+                logging.info(eval_tracker)
+                if wandb_logger:
+                    wandb_log_dict = {**eval_tracker.to_dict(), **eval_info}
+                    wandb_logger.log_dict(wandb_log_dict, step, mode="eval")
+                    wandb_logger.log_video(eval_info["video_paths"][0], step, mode="eval")
+
+            # Make sure all processes wait for evaluation to complete
+            if cfg.distributed:
+                dist.barrier()
+    
 
     if eval_env:
         eval_env.close()
+    if cfg.distributed:
+        dist.destroy_process_group()
     logging.info("End of training")
 
 

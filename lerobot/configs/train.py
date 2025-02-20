@@ -38,7 +38,10 @@ class TrainPipelineConfig(HubMixin):
     device: str | None = None  # cuda | cpu | mp
     # `use_amp` determines whether to use Automatic Mixed Precision (AMP) for training and evaluation. With AMP,
     # automatic gradient scaling is used.
-    use_amp: bool = False
+    use_amp: bool = False\
+    # `distributed` determines whether to use FSDP training. FSDP is a distributed training method that uses
+    # gradient accumulation to simulate larger batch sizes.
+    distributed: bool = False
     # `seed` is used for training (eg: model initialization, dataset shuffling)
     # AND for the evaluation environments.
     seed: int | None = 1000

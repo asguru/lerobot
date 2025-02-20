@@ -40,6 +40,8 @@ class PreTrainedConfig(draccus.ChoiceRegistry, HubMixin, abc.ABC):
     input_features: dict[str, PolicyFeature] = field(default_factory=dict)
     output_features: dict[str, PolicyFeature] = field(default_factory=dict)
 
+    dataset_stats: str = ""
+
     def __post_init__(self):
         self.pretrained_path = None
 

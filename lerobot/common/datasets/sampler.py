@@ -26,6 +26,8 @@ class EpisodeAwareSampler:
         drop_n_first_frames: int = 0,
         drop_n_last_frames: int = 0,
         shuffle: bool = False,
+        num_replicas: int = 1,  # Add parameter for total number of processes
+        rank: int = 0,          # Add parameter for current process rank
     ):
         """Sampler that optionally incorporates episode boundary information.
 
@@ -46,16 +48,46 @@ class EpisodeAwareSampler:
                     range(start_index.item() + drop_n_first_frames, end_index.item() - drop_n_last_frames)
                 )
 
+        # Store distributed training parameters
+        self.num_replicas = num_replicas
+        self.rank = rank
+
+        # Calculate number of samples per process
+        self.num_samples = len(indices) // self.num_replicas
+        self.total_size = self.num_samples * self.num_replicas
+        
+        # Trim indices to make evenly divisible across processes
+        indices = indices[:self.total_size]
+
         self.indices = indices
         self.shuffle = shuffle
 
     def __iter__(self) -> Iterator[int]:
+        # if self.shuffle:
+        #     for i in torch.randperm(len(self.indices)):
+        #         yield self.indices[i]
+        # else:
+        #     for i in self.indices:
+        #         yield i
+        
         if self.shuffle:
-            for i in torch.randperm(len(self.indices)):
-                yield self.indices[i]
+            # Create a deterministic shuffle that's the same across processes
+            g = torch.Generator()
+            g.manual_seed(torch.initial_seed())  # Use PyTorch's initial seed
+            indices = torch.randperm(len(self.indices), generator=g).tolist()
+            
+            # Get this rank's subset of the shuffled indices
+            indices = indices[self.rank:self.total_size:self.num_replicas]
+            
+            # Map back to original dataset indices
+            for idx in indices:
+                yield self.indices[idx]
         else:
-            for i in self.indices:
-                yield i
+            # If not shuffling, just take every num_replicas-th index starting from rank
+            for i in range(self.rank, len(self.indices), self.num_replicas):
+                yield self.indices[i]
 
     def __len__(self) -> int:
-        return len(self.indices)
+        # return len(self.indices)
+        # Return number of samples this rank will see
+        return self.num_samples

@@ -67,6 +67,7 @@ from tqdm import trange
 
 from lerobot.common.envs.factory import make_env
 from lerobot.common.envs.utils import preprocess_observation
+from lerobot.common.datasets.lerobot_dataset import LeRobotDatasetMetadata
 from lerobot.common.policies.factory import make_policy
 from lerobot.common.policies.pretrained import PreTrainedPolicy
 from lerobot.common.policies.utils import get_device_from_parameters
@@ -79,6 +80,8 @@ from lerobot.common.utils.utils import (
 )
 from lerobot.configs import parser
 from lerobot.configs.eval import EvalPipelineConfig
+
+import pdb
 
 
 def rollout(
@@ -125,7 +128,9 @@ def rollout(
     # Reset the policy and environments.
     policy.reset()
 
+    # pdb.set_trace()
     observation, info = env.reset(seed=seeds)
+    
     if render_callback is not None:
         render_callback(env)
 
@@ -154,6 +159,8 @@ def rollout(
         observation = {
             key: observation[key].to(device, non_blocking=device.type == "cuda") for key in observation
         }
+        # observation["task"] = ["pick up the object"] * observation["observation.state"].shape[0]
+        observation["task"] = ["Lift the object"] * observation["observation.state"].shape[0]
 
         with torch.inference_mode():
             action = policy.select_action(observation)
@@ -470,10 +477,15 @@ def eval(cfg: EvalPipelineConfig):
     env = make_env(cfg.env, n_envs=cfg.eval.batch_size, use_async_envs=cfg.eval.use_async_envs)
 
     logging.info("Making policy.")
+    ds_meta = LeRobotDatasetMetadata(
+        "lerobot/xarm_lift_medium",
+        "/home/scratch.driveix_50t_4/aguru/lerobot_results/pi0_pretrained/"
+    )
     policy = make_policy(
         cfg=cfg.policy,
         device=device,
         env_cfg=cfg.env,
+        ds_meta=ds_meta
     )
     policy.eval()
 
