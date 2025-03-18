@@ -42,7 +42,8 @@ class EnvConfig(draccus.ChoiceRegistry, abc.ABC):
 class AlohaEnv(EnvConfig):
     task: str = "AlohaInsertion-v0"
     fps: int = 50
-    episode_length: int = 400
+    # FIXME: Temporarily changing to 100, can change back to 400 after
+    episode_length: int = 100
     obs_type: str = "pixels_agent_pos"
     render_mode: str = "rgb_array"
     features: dict[str, PolicyFeature] = field(

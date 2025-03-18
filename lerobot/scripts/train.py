@@ -218,7 +218,8 @@ def train(cfg: TrainPipelineConfig):
         # File writing operations
         dataset = make_dataset(cfg)
         # Make sure files are written
-        dist.barrier()
+        if cfg.distributed:
+            dist.barrier()
     else:
         # Other ranks wait for rank 0 to finish writing files
         dist.barrier()
@@ -319,6 +320,12 @@ def train(cfg: TrainPipelineConfig):
     dl_iter = cycle(dataloader)
 
     policy.train()
+
+    # FIXME: remove this, but just trying to save checkpoint for debugging
+    # print("Saving checkpoint")
+    # checkpoint_dir = get_step_checkpoint_dir(cfg.output_dir, cfg.steps, 0)
+    # save_checkpoint(checkpoint_dir, step, cfg, policy, optimizer, lr_scheduler)
+    # print("Saved checkpoint")
 
     train_metrics = {
         "loss": AverageMeter("loss", ":.3f"),

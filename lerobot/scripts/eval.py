@@ -160,8 +160,7 @@ def rollout(
             key: observation[key].to(device, non_blocking=device.type == "cuda") for key in observation
         }
         # observation["task"] = ["pick up the object"] * observation["observation.state"].shape[0]
-        observation["task"] = ["Lift the object"] * observation["observation.state"].shape[0]
-
+        observation["task"] = ["Lift the block"] * observation["observation.state"].shape[0]
         with torch.inference_mode():
             action = policy.select_action(observation)
 
@@ -478,6 +477,9 @@ def eval_main(cfg: EvalPipelineConfig):
 
     logging.info("Making policy.")
     ds_meta = LeRobotDatasetMetadata(
+        # "lerobot/xarm_lift_medium",
+        # "lerobot/aloha_sim_transfer_cube_human",
+        # "lerobot/aloha_sim_insertion_human",
         "lerobot/xarm_lift_medium",
         "/home/scratch.driveix_50t_4/aguru/lerobot_results/pi0_pretrained/"
     )
