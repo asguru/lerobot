@@ -301,7 +301,7 @@ class PI0Policy(PreTrainedPolicy):
             # `self.model.forward` returns a (batch_size, n_action_steps, action_dim) tensor, but the queue
             # effectively has shape (n_action_steps, batch_size, *), hence the transpose.
             # FIXME: only adding the first 5 actions to the queue for now, to make execution more closed loop
-            self._action_queue.extend(actions.transpose(0, 1)[:5])
+            self._action_queue.extend(actions.transpose(0, 1)[:25])
         return self._action_queue.popleft()
 
     def forward(self, batch: dict[str, Tensor], noise=None, time=None) -> tuple[Tensor, dict[str, Tensor]]:

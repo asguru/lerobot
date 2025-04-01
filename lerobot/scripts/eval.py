@@ -160,7 +160,7 @@ def rollout(
             key: observation[key].to(device, non_blocking=device.type == "cuda") for key in observation
         }
         # observation["task"] = ["pick up the object"] * observation["observation.state"].shape[0]
-        observation["task"] = ["Lift the block"] * observation["observation.state"].shape[0]
+        observation["task"] = ["Insert the peg into the socket."] * observation["observation.state"].shape[0]
         with torch.inference_mode():
             action = policy.select_action(observation)
 
@@ -480,8 +480,10 @@ def eval_main(cfg: EvalPipelineConfig):
         # "lerobot/xarm_lift_medium",
         # "lerobot/aloha_sim_transfer_cube_human",
         # "lerobot/aloha_sim_insertion_human",
-        "lerobot/xarm_lift_medium",
-        "/home/scratch.driveix_50t_4/aguru/lerobot_results/pi0_pretrained/"
+        # "lerobot/xarm_lift_medium",
+        # "/home/scratch.driveix_50t_4/aguru/lerobot_results/pi0_pretrained/"
+        "lerobot/aloha_sim_insertion_human",
+        "/home/scratch.driveix_50t_4/aguru/lerobot_results/pi0_aloha_12/020000/pretrained_model"
     )
     policy = make_policy(
         cfg=cfg.policy,

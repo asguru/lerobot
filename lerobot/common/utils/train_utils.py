@@ -13,10 +13,14 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import os
 import logging
 from pathlib import Path
 
 from termcolor import colored
+import random
+import numpy as np
+import torch
 from torch.optim import Optimizer
 from torch.optim.lr_scheduler import LRScheduler
 
@@ -28,6 +32,9 @@ from torch.distributed.fsdp import (
     StateDictType,
     BackwardPrefetch,
 )
+# import torch.distributed.checkpoint as dist_cp
+from torch.distributed.checkpoint import save, FileSystemWriter, DefaultSavePlanner
+from torch.distributed.checkpoint.state_dict import get_state_dict
 
 from lerobot.common.constants import (
     CHECKPOINTS_DIR,
@@ -171,13 +178,48 @@ def save_fsdp_checkpoint(
     # Ensure all processes reach this point before saving
     dist.barrier()
 
-    with FSDP.state_dict_type(policy, StateDictType.FULL_STATE_DICT):
-        policy_state = policy.state_dict()
-        if dist.get_rank() == 0:
-            # Get the unwrapped model to access save_pretrained
-            unwrapped_policy = policy.module
-            unwrapped_policy.save_pretrained(pretrained_dir, state_dict=policy_state)
-            cfg.save_pretrained(pretrained_dir)
+    # with FSDP.state_dict_type(policy, StateDictType.FULL_STATE_DICT):
+    #     policy_state = policy.state_dict()
+    #     if dist.get_rank() == 0:
+    #         # Get the unwrapped model to access save_pretrained
+    #         unwrapped_policy = policy.module
+    #         unwrapped_policy.save_pretrained(pretrained_dir, state_dict=policy_state)
+    #         cfg.save_pretrained(pretrained_dir)
+
+    # policy_state = policy.state_dict()
+    # policy_state, optim_state = get_state_dict(policy, optimizer)
+    # # Clone tensors to avoid shared storage issues
+    # for k, v in policy_state.items():
+    #     if isinstance(v, torch.Tensor):
+    #         policy_state[k] = v.clone()
+            
+    # if dist.get_rank() == 0:
+    #     unwrapped_policy = policy.module
+    #     unwrapped_policy.save_pretrained(pretrained_dir, state_dict=policy_state)
+    #     cfg.save_pretrained(pretrained_dir)
+
+
+    if dist.get_rank() == 0:
+        os.makedirs(pretrained_dir, exist_ok=True)
+        # Save the model configuration
+        unwrapped_policy = policy.module
+        unwrapped_policy.config.save_pretrained(pretrained_dir)
+        cfg.save_pretrained(pretrained_dir)
+
+    # Use distributed checkpoint API to save the model
+    policy_state, optim_state = get_state_dict(policy, optimizer)
+    save(
+        state_dict=policy_state,
+        checkpoint_id=os.path.join(pretrained_dir, "model"),
+        planner=DefaultSavePlanner(),
+        storage_writer=FileSystemWriter(os.path.join(pretrained_dir, "checkpoint")),
+    )
+    save(
+        state_dict=optim_state,
+        checkpoint_id=os.path.join(training_state_dir, "optimizer"),
+        planner=DefaultSavePlanner(),
+        storage_writer=FileSystemWriter(os.path.join(training_state_dir, "checkpoint")),
+    )
 
     # Save training state
     if dist.get_rank() == 0:
@@ -185,17 +227,18 @@ def save_fsdp_checkpoint(
         write_json({"step": step}, training_state_dir / "training_step.json")
 
         # Save RNG states
-        rng_state = {
-            "torch_rng": torch.get_rng_state(),
-            "cuda_rng": torch.cuda.get_rng_state() if torch.cuda.is_available() else None,
-            "numpy_rng": np.random.get_state(),
-            "python_rng": random.getstate(),
-        }
-        save_safetensors(rng_state, training_state_dir / "rng_state.safetensors")
+        # rng_state = {
+        #     "torch_rng": torch.get_rng_state(),
+        #     "cuda_rng": torch.cuda.get_rng_state() if torch.cuda.is_available() else None,
+        #     "numpy_rng": np.random.get_state(),
+        #     "python_rng": random.getstate(),
+        # }
+        # save_safetensors(rng_state, training_state_dir / "rng_state.safetensors")
+        save_rng_state(training_state_dir)
 
         # Save optimizer state
-        optim_state = FSDP.full_optim_state_dict(policy, optimizer)
-        save_safetensors(optim_state, training_state_dir / "optimizer_state.safetensors")
+        # optim_state = FSDP.full_optim_state_dict(policy, optimizer)
+        # save_safetensors(optim_state, training_state_dir / "optimizer_state.safetensors")
         write_json(optimizer.state_dict()["param_groups"], training_state_dir / "optimizer_param_groups.json")
 
         # Save scheduler state if it exists

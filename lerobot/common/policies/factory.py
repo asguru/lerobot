@@ -138,6 +138,7 @@ def make_policy(
         # Load a pretrained policy and override the config if needed (for example, if there are inference-time
         # hyperparameters that we want to vary).
         kwargs["pretrained_name_or_path"] = cfg.pretrained_path
+        kwargs["distcp"] = cfg.distcp
         print("calling from pretrained")
         print("policy cls is {}".format(policy_cls))
         policy = policy_cls.from_pretrained(**kwargs)
@@ -145,7 +146,8 @@ def make_policy(
         # Make a fresh policy.
         policy = policy_cls(**kwargs)
 
-    policy.to(cfg.device)
+    print("-----------------POLICY DEVICE TO SET IS {}-----------------".format(cfg.device))
+    # policy.to(cfg.device)
     assert isinstance(policy, nn.Module)
 
     # policy = torch.compile(policy, mode="reduce-overhead")

@@ -576,6 +576,7 @@ class LeRobotDataset(torch.utils.data.Dataset):
         allow_patterns: list[str] | str | None = None,
         ignore_patterns: list[str] | str | None = None,
     ) -> None:
+        print("------THE ROOT IS {}------".format(self.root))
         snapshot_download(
             self.repo_id,
             repo_type="dataset",

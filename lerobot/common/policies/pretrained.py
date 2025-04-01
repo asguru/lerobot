@@ -24,7 +24,9 @@ from huggingface_hub.constants import SAFETENSORS_SINGLE_FILE
 from huggingface_hub.errors import HfHubHTTPError
 from safetensors.torch import load_model as load_model_as_safetensor
 from safetensors.torch import save_model as save_model_as_safetensor
+import torch
 from torch import Tensor, nn
+import torch.distributed.checkpoint as dcp
 
 from lerobot.common.utils.hub import HubMixin
 from lerobot.configs.policies import PreTrainedConfig
@@ -87,6 +89,7 @@ class PreTrainedPolicy(nn.Module, HubMixin, abc.ABC):
         local_files_only: bool = False,
         revision: str | None = None,
         strict: bool = False,
+        distcp: bool = False,
         **kwargs,
     ) -> T:
         """
@@ -109,8 +112,11 @@ class PreTrainedPolicy(nn.Module, HubMixin, abc.ABC):
         instance = cls(config, **kwargs)
         if os.path.isdir(model_id):
             print("Loading weights from local directory")
-            model_file = os.path.join(model_id, SAFETENSORS_SINGLE_FILE)
-            policy = cls._load_as_safetensor(instance, model_file, config.device, strict)
+            if distcp:
+                policy = cls._load_as_distcp(instance, os.path.join(model_id, "model"), config.device, strict)
+            else:
+                model_file = os.path.join(model_id, SAFETENSORS_SINGLE_FILE)
+                policy = cls._load_as_safetensor(instance, model_file, config.device, strict)
         else:
             try:
                 model_file = hf_hub_download(
@@ -130,7 +136,7 @@ class PreTrainedPolicy(nn.Module, HubMixin, abc.ABC):
                     f"{SAFETENSORS_SINGLE_FILE} not found on the HuggingFace Hub in {model_id}"
                 ) from e
 
-        policy.to(config.device)
+        # policy.to(config.device)
         policy.eval()
         return policy
 
@@ -148,6 +154,22 @@ class PreTrainedPolicy(nn.Module, HubMixin, abc.ABC):
                 model.to(map_location)
         else:
             safetensors.torch.load_model(model, model_file, strict=strict, device=map_location)
+        return model
+    
+    @classmethod
+    def _load_as_distcp(cls, model: T, model_file: str, map_location: str, strict: bool) -> T:
+        state_dict = {
+            "model": model.state_dict(),
+        }
+        # dcp.load(
+        #     state_dict=state_dict,
+        #     checkpoint_id=model_file,
+        #     planner=dcp.DefaultLoadPlanner(allow_partial_load=True)
+        # )
+        updated_state_dict = torch.load("/home/scratch.driveix_50t_4/aguru/lerobot_results/pi0_aloha_adapt12/last/pretrained_model/pi0_aloha_12bs.pt")
+        model.load_state_dict(updated_state_dict)
+        # model.load_state_dict(state_dict["model"])
+        model.to(map_location)
         return model
 
     # def generate_model_card(self, *args, **kwargs) -> ModelCard:

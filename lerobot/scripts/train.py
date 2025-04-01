@@ -190,6 +190,7 @@ def train(cfg: TrainPipelineConfig):
         init_distributed()
         world_size = dist.get_world_size()
         rank = dist.get_rank()
+        print(f"Rank {dist.get_rank()} using GPU: {torch.cuda.current_device()}")
     else:
         world_size = 1
         rank = 0
@@ -385,8 +386,8 @@ def train(cfg: TrainPipelineConfig):
             else:
                 save_checkpoint(checkpoint_dir, step, cfg, policy, optimizer, lr_scheduler)
             update_last_checkpoint(checkpoint_dir)
-            if wandb_logger:
-                wandb_logger.log_policy(checkpoint_dir)
+            # if wandb_logger:
+            #     wandb_logger.log_policy(checkpoint_dir)
 
         # if cfg.env and is_eval_step:
         #     step_id = get_step_identifier(step, cfg.steps)

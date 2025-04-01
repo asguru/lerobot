@@ -43,7 +43,7 @@ class AlohaEnv(EnvConfig):
     task: str = "AlohaInsertion-v0"
     fps: int = 50
     # FIXME: Temporarily changing to 100, can change back to 400 after
-    episode_length: int = 100
+    episode_length: int = 1000
     obs_type: str = "pixels_agent_pos"
     render_mode: str = "rgb_array"
     features: dict[str, PolicyFeature] = field(
@@ -123,7 +123,7 @@ class PushtEnv(EnvConfig):
 class XarmEnv(EnvConfig):
     task: str = "XarmLift-v0"
     fps: int = 15
-    episode_length: int = 200
+    episode_length: int = 800
     obs_type: str = "pixels_agent_pos"
     render_mode: str = "rgb_array"
     visualization_width: int = 384

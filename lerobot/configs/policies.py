@@ -59,7 +59,10 @@ class PreTrainedConfig(draccus.ChoiceRegistry, HubMixin, abc.ABC):
     # `use_amp` determines whether to use Automatic Mixed Precision (AMP) for training and evaluation. With AMP,
     # automatic gradient scaling is used.
     use_amp: bool = False
+    distcp: bool = False
     dataset_stats: str = ""
+    adapt_to_pi_aloha: bool = False
+    use_delta_joint_actions_aloha: bool = False
 
     def __post_init__(self):
         self.pretrained_path = None
