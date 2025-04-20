@@ -3,11 +3,12 @@ import torch.nn as nn
 import torch.nn.functional as F
 import clip
 from typing import Optional, Tuple, List, Union
-from otter.util.args import SharedConfig, ModelConfig
+from lerobot.common.policies.otter.configuration_otter import OtterConfig
 from .transformer import AttentionPooling, CausalTransformer
 from .models import TextAwareVisualExtraction, ProprioceptionEncoder, ActionHead
 from .vision_tf import clip_transform
 from clip.simple_tokenizer import SimpleTokenizer
+from lerobot.common.constants import OBS_ROBOT, ACTION
 
 # Create mask for SOS, EOS, and padding tokens
 def create_text_mask(text: torch.Tensor, sot_token: int, eot_token: int, first_k_tokens: int) -> torch.Tensor:
@@ -37,34 +38,43 @@ def create_text_mask(text: torch.Tensor, sot_token: int, eot_token: int, first_k
         text_mask = text_mask[:, :first_k_tokens]  
     return text_mask
 
-class OTTER(nn.Module):
-    """Full OTTER model with temporal sequence handling"""
+class OtterPolicy(nn.Module):
+    """Full Otter model with temporal sequence handling"""
     def __init__(
         self,
-        model_config: ModelConfig,
-        shared_config: SharedConfig, 
+        config: OtterConfig,
+        dataset_stats: dict[str, dict[str, torch.Tensor]] | None = None,
     ):
         super().__init__()
         # Extract model parameters from config
-        self.clip_model_name = model_config.clip_model
-        self.proprio_input_dim = model_config.proprio_input_dim 
-        proprio_hidden_dim = model_config.proprio_hidden_dim
-        proprio_output_dim = model_config.proprio_output_dim
-        text_pooling_output_dim = model_config.text_pooling_output_dim
-        vision_pooling_output_dim = model_config.vision_pooling_output_dim
-        pooling_heads = model_config.pooling_heads
-        pooling_layers = model_config.pooling_layers
-        self.action_dim = model_config.action_dim
-        self.first_k_tokens = model_config.first_k_tokens
-        self.num_readouts = model_config.num_readouts
-        self.pool_true_text = model_config.pool_true_text
+        self.clip_model_name = config.clip_model
+        self.proprio_input_dim = config.proprio_input_dim 
+        proprio_hidden_dim = config.proprio_hidden_dim
+        proprio_output_dim = config.proprio_output_dim
+        text_pooling_output_dim = config.text_pooling_output_dim
+        vision_pooling_output_dim = config.vision_pooling_output_dim
+        pooling_heads = config.pooling_heads
+        pooling_layers = config.pooling_layers
+        self.action_dim = config.action_dim
+        self.first_k_tokens = config.first_k_tokens
+        self.num_readouts = config.num_readouts
+        self.pool_true_text = config.pool_true_text
         
         # extract shared config parameters
-        self.action_horizon = shared_config.action_horizon
-        self.camera_keys = sorted(shared_config.camera_keys)
+        self.action_horizon = config.chunk_size
+        
+        # Get camera keys from dataset_stats
+        if dataset_stats is None:
+            raise ValueError("dataset_stats must be provided to extract camera keys")
+        # Find all keys that start with "observation.image"
+        self.camera_keys = sorted([k for k in dataset_stats.keys() if k.startswith("observation.image")])
+        if not self.camera_keys:
+            raise ValueError("No camera keys found in dataset_stats")
         num_cameras = len(self.camera_keys)
-        self.seq_length = shared_config.seq_length
-        self.image_size = shared_config.image_size
+        
+        # FIXME: should this be a separate param?
+        self.seq_length = config.chunk_size
+        self.image_size = config.image_size
         
         # Load CLIP model
         self.clip_model, self.image_preprocess = clip.load(self.clip_model_name)
@@ -118,11 +128,11 @@ class OTTER(nn.Module):
         )
         
         self.f_t_dim = text_pooling_output_dim + vision_pooling_output_dim + proprio_output_dim
-        self.input_projection = nn.Linear(self.f_t_dim, model_config.transformer_dim)
+        self.input_projection = nn.Linear(self.f_t_dim, config.transformer_dim)
         
-        self.policy = CausalTransformer(model_config)
+        self.policy = CausalTransformer(config)
         
-        self.action_head = ActionHead(model_config.transformer_dim, self.action_dim, self.action_horizon)
+        self.action_head = ActionHead(config.transformer_dim, self.action_dim, self.action_horizon)
 
         # Store activations dict at instance level
         self.activation = {}
@@ -150,7 +160,15 @@ class OTTER(nn.Module):
         """Reset the transformer input cache"""
         self.cached_transformer_input = None
         self.cache_size = 0
+
+    def get_optim_params(self) -> dict:
+        """Get parameters for optimization.
         
+        Returns:
+            All model parameters that can be optimized.
+        """
+        return self.parameters()
+
     def update_cache(self, transformer_input: torch.Tensor):
         """
         Update the transformer input cache
@@ -331,25 +349,127 @@ class OTTER(nn.Module):
 
         return actions
 
+    def prepare_language(self, batch: dict[str, torch.Tensor]) -> torch.Tensor:
+        """Tokenize the text input using CLIP's tokenizer.
+        
+        Args:
+            batch: Dictionary containing task key with text input
+            
+        Returns:
+            Tokenized text tensor ready for CLIP encoding
+        """
+        device = batch[OBS_ROBOT].device
+        tasks = batch["task"]
+
+        # Tokenize using CLIP's tokenizer
+        if isinstance(tasks, list):
+            text = clip.tokenize(tasks).to(device)
+        else:
+            text = tasks.to(device)
+
+        return text
+
+    def resize_with_pad(self, img: torch.Tensor, width: int, height: int, pad_value: float = 0.0) -> torch.Tensor:
+        """Resize image maintaining aspect ratio and pad to target size.
+        
+        Args:
+            img: Image tensor of shape (B, C, H, W)
+            width: Target width
+            height: Target height
+            pad_value: Value to use for padding
+            
+        Returns:
+            Resized and padded image tensor
+        """
+        if img.ndim != 4:
+            raise ValueError(f"Expected 4D (B,C,H,W) tensor, but got shape {img.shape}")
+
+        cur_height, cur_width = img.shape[2:]
+
+        ratio = max(cur_width / width, cur_height / height)
+        resized_height = int(cur_height / ratio)
+        resized_width = int(cur_width / ratio)
+        resized_img = F.interpolate(
+            img, size=(resized_height, resized_width), mode="bilinear", align_corners=False
+        )
+
+        pad_height = max(0, int(height - resized_height))
+        pad_width = max(0, int(width - resized_width))
+
+        # pad on left and top of image
+        padded_img = F.pad(resized_img, (pad_width, 0, pad_height, 0), value=pad_value)
+        return padded_img
+
+    def prepare_images(self, batch: dict[str, torch.Tensor]) -> torch.Tensor:
+        """Prepare images for CLIP encoding.
+        
+        Args:
+            batch: Dictionary containing image tensors of shape (B, T, C, H, W)
+            
+        Returns:
+            Preprocessed images ready for CLIP encoding
+        """
+        # Extract and stack images from all cameras
+        image_tensors = []
+        print("camera keys", self.camera_keys)
+        for key in self.camera_keys:
+            if key in batch:
+                img = batch[key]  # (B, T, C, H, W)
+                print("img for key", key, img.shape)
+                # Handle channel-last format if needed
+                if img.shape[-1] == 3:  # (*, H, W, 3)
+                    img = img.permute(0, 1, 4, 2, 3)  # (B, T, 3, H, W)
+                image_tensors.append(img)
+        
+        if not image_tensors:
+            raise ValueError(f"No camera images found in batch. Expected keys: {self.camera_keys}")
+            
+        # Stack images along camera dimension
+        images = torch.stack(image_tensors, dim=2)  # (B, T, num_cameras, C, H, W)
+        
+        # Ensure images are float and in correct range
+        if not torch.is_floating_point(images):
+            images = images.float() / 255.0
+            
+        # Resize images to 224x224 maintaining aspect ratio
+        B, T, num_cameras = images.shape[:3]
+        images = images.view(B * T * num_cameras, *images.shape[3:])  # (B*T*num_cameras, C, H, W)
+        print("images shape before resize", images.shape)
+        images = self.resize_with_pad(images, 224, 224, pad_value=0.0)
+        print("images shape after resize", images.shape)
+        images = images.view(B, T, num_cameras, *images.shape[1:])  # (B, T, num_cameras, C, 224, 224)
+            
+        # Apply CLIP preprocessing
+        images = clip_transform(images)
+        
+        return images
+
     def forward(
         self,
-        images: Union[torch.Tensor, dict],  # (B, T, num_cameras, C, H, W) or dict of (B, T, C, H, W), may be channel last as well
-        text: Union[torch.Tensor, List[str]],        # (B, max_text_len) or a list of strings, list with len B
-        proprio: torch.Tensor,     # (B, T, proprio_dim)
-        gt_actions: Optional[torch.Tensor] = None,   # (B, T, action_horizon, action_dim)
-    ) -> torch.Tensor:
+        batch: dict[str, torch.Tensor],  # Dictionary containing observation.image.*, task, OBS_ROBOT, and ACTION keys
+    ) -> tuple[torch.Tensor, dict[str, float]]:
+        """
+        Forward pass for training.
         
-        # Handle dictionary input for images
-        if isinstance(images, dict):
-            # Stack images in order of self.camera_keys
-            image_tensors = [images[key] for key in self.camera_keys]
-            images = torch.stack(image_tensors, dim=2) # (B, T, num_cameras, C, H, W) or (B, T, num_cameras, H, W, C)
-            # maybe it is channel last, if that is the case, move to channel first
-            if images.shape[-1] == 3: # (*, H, W, 3) 
-                images = images.permute(0, 1, 2, 5, 3, 4) # (B, T, num_cameras, 3, H, W)
-
-        if isinstance(text, list):
-            text = clip.tokenize(text).to(images.device) # (B, max_text_len)
+        Args:
+            batch: Dictionary containing:
+                - observation.image.*: Image tensors from multiple cameras (B, T, C, H, W)
+                - task: Text input (B, max_text_len)
+                - OBS_ROBOT: Proprioceptive state (B, T, proprio_dim)
+                - ACTION: Ground truth actions (B, T, action_horizon, action_dim)
+        
+        Returns:
+            Tuple of (loss, loss_dict) where:
+                - loss: The computed loss tensor
+                - loss_dict: Dictionary containing loss values for logging
+        """
+        # Prepare images
+        images = self.prepare_images(batch)
+        
+        # Extract and prepare other inputs
+        text = self.prepare_language(batch)  # (B, max_text_len)
+        proprio = batch[OBS_ROBOT]  # (B, T, proprio_dim)
+        gt_actions = batch[ACTION]  # (B, T, action_horizon, action_dim)
         
         # Create mask for SOS, EOS, and padding tokens
         if self.pool_true_text:
@@ -357,22 +477,16 @@ class OTTER(nn.Module):
             text_mask = text_mask.to(images.device)
         else:
             text_mask = None
-        
-        # check images dtype: if not float, transform
-        if not torch.is_floating_point(images):
-            images = clip_transform(images)
 
         # perform action generation
         # actions shape: (B, T, action_horizon, action_dim)
         actions = self.forward_actions(images, text, proprio, text_mask)
         
-        # if gt_actions is not None, calculate loss
-        if gt_actions is not None:
-            # Calculate loss
-            loss = F.l1_loss(actions, gt_actions)
-            return loss
-        else: 
-            return actions
+        # Calculate loss
+        loss = F.l1_loss(actions, gt_actions)
+        loss_dict = {"l1_loss": loss.item()}
+        
+        return loss, loss_dict
         
     def __repr__(self):
         """

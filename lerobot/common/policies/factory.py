@@ -28,6 +28,7 @@ from lerobot.common.policies.pi0.configuration_pi0 import PI0Config
 from lerobot.common.policies.pretrained import PreTrainedPolicy
 from lerobot.common.policies.tdmpc.configuration_tdmpc import TDMPCConfig
 from lerobot.common.policies.vqbet.configuration_vqbet import VQBeTConfig
+from lerobot.common.policies.otter.configuration_otter import OtterConfig
 from lerobot.configs.policies import PreTrainedConfig
 from lerobot.configs.types import FeatureType
 
@@ -54,6 +55,10 @@ def get_policy_class(name: str) -> PreTrainedPolicy:
         from lerobot.common.policies.pi0.modeling_pi0 import PI0Policy
 
         return PI0Policy
+    elif name == "otter":
+        from lerobot.common.policies.otter.modeling_otter import OtterPolicy
+
+        return OtterPolicy
     else:
         raise NotImplementedError(f"Policy with name {name} is not implemented.")
 
@@ -69,6 +74,8 @@ def make_policy_config(policy_type: str, **kwargs) -> PreTrainedConfig:
         return VQBeTConfig(**kwargs)
     elif policy_type == "pi0":
         return PI0Config(**kwargs)
+    elif policy_type == "otter":
+        return OtterConfig(**kwargs)
     else:
         raise ValueError(f"Policy type '{policy_type}' is not available.")
 
@@ -119,6 +126,8 @@ def make_policy(
     kwargs = {}
     if ds_meta is not None:
         features = dataset_to_policy_features(ds_meta.features)
+        print("ds meta is")
+        print(ds_meta)
         kwargs["dataset_stats"] = ds_meta.stats
     else:
         if not cfg.pretrained_path:
@@ -147,7 +156,7 @@ def make_policy(
         policy = policy_cls(**kwargs)
 
     print("-----------------POLICY DEVICE TO SET IS {}-----------------".format(cfg.device))
-    # policy.to(cfg.device)
+    policy.to(cfg.device)
     assert isinstance(policy, nn.Module)
 
     # policy = torch.compile(policy, mode="reduce-overhead")

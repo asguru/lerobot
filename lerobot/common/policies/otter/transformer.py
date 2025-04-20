@@ -2,7 +2,8 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from typing import Optional, Tuple
-from otter.util.args import ModelConfig
+# from otter.util.args import ModelConfig
+from lerobot.common.policies.otter.configuration_otter import OtterConfig
 from timm.layers.mlp import Mlp
 
 class RotaryPositionalEmbedding(nn.Module):
@@ -64,7 +65,7 @@ def apply_rotary_pos_emb(q: torch.Tensor, k: torch.Tensor, pos_emb: torch.Tensor
     return q_out, k_out
     
 class MultiHeadAttention(nn.Module):
-    def __init__(self, config : ModelConfig):
+    def __init__(self, config : OtterConfig):
         super().__init__()
         if config.transformer_dim % config.transformer_heads != 0:
             raise ValueError(
@@ -124,7 +125,7 @@ class MultiHeadAttention(nn.Module):
     
 
 class TransformerBlock(nn.Module):
-    def __init__(self, config : ModelConfig):
+    def __init__(self, config : OtterConfig):
         super().__init__()
         self.attention = MultiHeadAttention(config)
         intermediate_size = config.transformer_dim * config.transformer_expansion_factor
@@ -163,7 +164,7 @@ class CausalTransformer(nn.Module):
     """Main policy transformer with RoPE and causal attention"""
     def __init__(
         self,
-        config: ModelConfig,
+        config: OtterConfig,
     ):
         super().__init__()
         self.layers = nn.ModuleList([
