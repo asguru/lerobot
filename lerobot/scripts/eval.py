@@ -68,6 +68,7 @@ from tqdm import trange
 from lerobot.common.envs.factory import make_env
 from lerobot.common.envs.utils import preprocess_observation
 from lerobot.common.datasets.lerobot_dataset import LeRobotDatasetMetadata
+from lerobot.common.datasets.lerobot_dataset import LeRobotDatasetMetadata
 from lerobot.common.policies.factory import make_policy
 from lerobot.common.policies.pretrained import PreTrainedPolicy
 from lerobot.common.policies.utils import get_device_from_parameters
@@ -80,6 +81,8 @@ from lerobot.common.utils.utils import (
 )
 from lerobot.configs import parser
 from lerobot.configs.eval import EvalPipelineConfig
+
+import pdb
 
 import pdb
 
@@ -129,7 +132,9 @@ def rollout(
     policy.reset()
 
     # pdb.set_trace()
+    # pdb.set_trace()
     observation, info = env.reset(seed=seeds)
+    
     
     if render_callback is not None:
         render_callback(env)
@@ -492,6 +497,7 @@ def eval_main(cfg: EvalPipelineConfig):
     policy = make_policy(
         cfg=cfg.policy,
         env_cfg=cfg.env,
+        ds_meta=ds_meta
         ds_meta=ds_meta
     )
     policy.eval()

@@ -147,7 +147,10 @@ def make_policy(
         # Load a pretrained policy and override the config if needed (for example, if there are inference-time
         # hyperparameters that we want to vary).
         kwargs["pretrained_name_or_path"] = cfg.pretrained_path
+<<<<<<< HEAD
         kwargs["distcp"] = cfg.distcp
+=======
+>>>>>>> ac161b66d4a4303bf4bb909ab310ba6e24890e17
         print("calling from pretrained")
         print("policy cls is {}".format(policy_cls))
         policy = policy_cls.from_pretrained(**kwargs)
