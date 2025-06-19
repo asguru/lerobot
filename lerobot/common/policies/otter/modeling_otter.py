@@ -9,6 +9,8 @@ from .models import TextAwareVisualExtraction, ProprioceptionEncoder, ActionHead
 from .vision_tf import clip_transform
 from clip.simple_tokenizer import SimpleTokenizer
 from lerobot.common.constants import OBS_ROBOT, ACTION
+from lerobot.common.policies.pretrained import PreTrainedPolicy
+from collections import deque
 
 # Create mask for SOS, EOS, and padding tokens
 def create_text_mask(text: torch.Tensor, sot_token: int, eot_token: int, first_k_tokens: int) -> torch.Tensor:
@@ -38,14 +40,18 @@ def create_text_mask(text: torch.Tensor, sot_token: int, eot_token: int, first_k
         text_mask = text_mask[:, :first_k_tokens]  
     return text_mask
 
-class OtterPolicy(nn.Module):
+class OtterPolicy(PreTrainedPolicy):
     """Full Otter model with temporal sequence handling"""
+    
+    config_class = OtterConfig
+    name = "otter"
+
     def __init__(
         self,
         config: OtterConfig,
         dataset_stats: dict[str, dict[str, torch.Tensor]] | None = None,
     ):
-        super().__init__()
+        super().__init__(config)
         # Extract model parameters from config
         self.clip_model_name = config.clip_model
         self.proprio_input_dim = config.proprio_input_dim 
@@ -155,7 +161,63 @@ class OtterPolicy(nn.Module):
         # Add cache for transformer inputs
         self.cached_transformer_input = None
         self.cache_size = 0
+        
+        # Initialize action queue
+        self._action_queue = deque([], maxlen=self.action_horizon)
     
+    def reset(self):
+        """Reset the model state when environment is reset.
+        
+        This includes:
+        1. Clearing the transformer input cache
+        2. Clearing the action queue
+        """
+        self.reset_cache()
+        self._action_queue.clear()
+
+    @torch.no_grad()
+    def select_action(self, batch: dict[str, torch.Tensor]) -> torch.Tensor:
+        """Select a single action given environment observations.
+        
+        This method manages an action queue and returns one action at a time.
+        When the queue is empty, it generates a new sequence of actions.
+        
+        Args:
+            batch: Dictionary containing:
+                - observation.image.*: Image tensors from multiple cameras
+                - task: Text input
+                - OBS_ROBOT: Proprioceptive state
+                
+        Returns:
+            Single action tensor of shape (action_dim,)
+        """
+        # If action queue is empty, generate new actions
+        if len(self._action_queue) == 0:
+            # Prepare inputs
+            images = self.prepare_images(batch)
+            text = self.prepare_language(batch)
+            proprio = batch[OBS_ROBOT]
+            
+            # Create text mask if needed
+            if self.pool_true_text:
+                text_mask = create_text_mask(text, self.sot_token, self.eot_token, self.first_k_tokens)
+                text_mask = text_mask.to(images.device)
+            else:
+                text_mask = None
+                
+            # Generate actions
+            actions = self.forward_actions(images, text, proprio, text_mask)
+            
+            # Add actions to queue
+            # actions shape: (B, T, action_horizon, action_dim)
+            # We want to queue them as (action_horizon, B, action_dim)
+            actions = actions.transpose(0, 2)  # (action_horizon, B, T, action_dim)
+            for action in actions:
+                self._action_queue.append(action[0, 0])  # Take first batch, first timestep
+                
+        # Return next action from queue
+        return self._action_queue.popleft()
+
     def reset_cache(self):
         """Reset the transformer input cache"""
         self.cached_transformer_input = None
@@ -469,6 +531,7 @@ class OtterPolicy(nn.Module):
         # Extract and prepare other inputs
         text = self.prepare_language(batch)  # (B, max_text_len)
         proprio = batch[OBS_ROBOT]  # (B, T, proprio_dim)
+        print("proprio shape", proprio.shape)
         gt_actions = batch[ACTION]  # (B, T, action_horizon, action_dim)
         
         # Create mask for SOS, EOS, and padding tokens

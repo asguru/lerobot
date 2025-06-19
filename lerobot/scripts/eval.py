@@ -159,11 +159,15 @@ def rollout(
         observation = {
             key: observation[key].to(device, non_blocking=device.type == "cuda") for key in observation
         }
+        # Unsqueeze all observations to (B, T, *)
+        for key in observation:
+            observation[key] = observation[key].unsqueeze(1)
         # observation["task"] = ["pick up the object"] * observation["observation.state"].shape[0]
         observation["task"] = ["Insert the peg into the socket."] * observation["observation.state"].shape[0]
         with torch.inference_mode():
             action = policy.select_action(observation)
 
+        print("output action shape is ", action.shape)
         # Convert to CPU / numpy.
         action = action.to("cpu").numpy()
         assert action.ndim == 2, "Action dimensions should be (batch, action_dim)"

@@ -1,0 +1,2 @@
+python lerobot/scripts/train.py --policy.type=otter --dataset.repo_id=lerobot/aloha_sim_insertion_human --distributed false --wandb.enable true --steps 30000 --save_freq 1000 --batch_size 1 --policy.n_obs_steps=12
+
